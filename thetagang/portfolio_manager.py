@@ -41,16 +41,19 @@ from thetagang.orders import Orders
 from thetagang.strategies import (
     EquityStrategyDeps,
     OptionsStrategyDeps,
+    PMCCStrategyDeps,
     PostStrategyDeps,
     run_equity_rebalance_stages,
     run_option_management_stages,
     run_option_write_stages,
+    run_pmcc_stages,
     run_post_stages,
 )
 from thetagang.strategies.equity import EquityRebalanceService, RegimeRebalanceService
 from thetagang.strategies.equity_engine import EquityRebalanceEngine
 from thetagang.strategies.options import OptionsManageService, OptionsWriteService
 from thetagang.strategies.options_engine import OptionsStrategyEngine
+from thetagang.strategies.pmcc_engine import PMCCEngine
 from thetagang.strategies.post_engine import PostStrategyEngine
 from thetagang.strategies.regime_engine import RegimeRebalanceEngine
 from thetagang.strategies.runtime_services import (
@@ -187,6 +190,12 @@ class PortfolioManager:
             orders=self.orders,
             qualified_contracts=self.qualified_contracts,
         )
+        self.pmcc_engine = PMCCEngine(
+            config=self.config,
+            ibkr=self.ibkr,
+            option_scanner=self.option_scanner,
+            order_ops=self.order_ops,
+        )
         if run_stage_flags is None:
             default_run = RunConfig(strategies=DEFAULT_RUN_STRATEGIES)
             self.run_stage_flags = stage_enabled_map_from_run(default_run)
@@ -229,6 +238,12 @@ class PortfolioManager:
             ),
             regime_service=cast(RegimeRebalanceService, self.equity_engine),
             rebalance_service=cast(EquityRebalanceService, self.equity_engine),
+        )
+
+    def _pmcc_strategy_deps(self, enabled_stages: set[str]) -> PMCCStrategyDeps:
+        return PMCCStrategyDeps(
+            enabled_stages=enabled_stages,
+            service=self.pmcc_engine,
         )
 
     def _post_strategy_deps(self, enabled_stages: set[str]) -> PostStrategyDeps:
@@ -668,15 +683,20 @@ class PortfolioManager:
 
             write_stage_ids = {"options_write_puts", "options_write_calls"}
             management_stage_ids = {"options_roll_positions", "options_close_positions"}
+            pmcc_stage_ids = {"pmcc_manage_leaps", "pmcc_write_short_calls"}
             post_stage_ids = {"post_vix_call_hedge", "post_cash_management"}
             option_stage_ids = write_stage_ids | management_stage_ids
-            refresh_before_stage_ids = management_stage_ids | post_stage_ids
+            refresh_before_stage_ids = (
+                management_stage_ids | pmcc_stage_ids | post_stage_ids
+            )
             pre_management_trade_stage_ids = {
                 "options_write_puts",
                 "options_write_calls",
                 "equity_regime_rebalance",
                 "equity_buy_rebalance",
                 "equity_sell_rebalance",
+                "pmcc_manage_leaps",
+                "pmcc_write_short_calls",
             }
 
             for stage_id in self.run_stage_order:
@@ -737,6 +757,12 @@ class PortfolioManager:
                 }:
                     await run_equity_rebalance_stages(
                         self._equity_strategy_deps({stage_id}),
+                        account_summary,
+                        portfolio_positions,
+                    )
+                elif stage_id in pmcc_stage_ids:
+                    await run_pmcc_stages(
+                        self._pmcc_strategy_deps({stage_id}),
                         account_summary,
                         portfolio_positions,
                     )

@@ -434,9 +434,21 @@ class RollWhenConfig(BaseModel, DisplayMixin):
 class TargetConfig(BaseModel, DisplayMixin):
     class Puts(BaseModel):
         delta: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+        spread_width: Optional[float] = Field(
+            default=None,
+            gt=0,
+            description="Width of the credit spread (e.g., 5.0 = $5 wide). "
+            "When set, a protective put is bought at (sold_strike - spread_width).",
+        )
 
     class Calls(BaseModel):
         delta: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+        spread_width: Optional[float] = Field(
+            default=None,
+            gt=0,
+            description="Width of the credit spread (e.g., 5.0 = $5 wide). "
+            "When set, a protective call is bought at (sold_strike + spread_width).",
+        )
 
     dte: int = Field(..., ge=0)
     minimum_open_interest: int = Field(..., ge=0)
@@ -446,6 +458,12 @@ class TargetConfig(BaseModel, DisplayMixin):
     maximum_new_contracts: Optional[int] = Field(default=None, ge=1)
     calls: Optional["TargetConfig.Calls"] = None
     puts: Optional["TargetConfig.Puts"] = None
+    spread_width: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Default spread width for both puts and calls. "
+        "Per-side overrides in puts.spread_width / calls.spread_width take precedence.",
+    )
 
     def add_to_table(self, table: Table, section: str = "") -> None:
         table.add_section()
@@ -458,6 +476,12 @@ class TargetConfig(BaseModel, DisplayMixin):
             table.add_row("", "Delta for puts", "<=", f"{self.puts.delta}")
         if self.calls and self.calls.delta:
             table.add_row("", "Delta for calls", "<=", f"{self.calls.delta}")
+        if self.spread_width:
+            table.add_row("", "Default spread width", "=", f"${self.spread_width}")
+        if self.puts and self.puts.spread_width:
+            table.add_row("", "Put spread width", "=", f"${self.puts.spread_width}")
+        if self.calls and self.calls.spread_width:
+            table.add_row("", "Call spread width", "=", f"${self.calls.spread_width}")
         table.add_row(
             "",
             "Maximum new contracts",
@@ -465,6 +489,92 @@ class TargetConfig(BaseModel, DisplayMixin):
             f"{pfmt(self.maximum_new_contracts_percent, 0)} of buying power",
         )
         table.add_row("", "Minimum open interest", "=", f"{self.minimum_open_interest}")
+
+
+class PMCCConfig(BaseModel, DisplayMixin):
+    """Poor Man's Covered Call (PMCC) strategy configuration.
+
+    Automates buying deep-ITM LEAPS calls and selling short-term OTM calls against them.
+    """
+
+    enabled: bool = Field(default=False)
+    symbols: List[str] = Field(
+        default_factory=list,
+        description="Symbols to run PMCC on. Must also appear in portfolio.symbols.",
+    )
+    leaps_delta: float = Field(
+        default=0.80,
+        ge=0.5,
+        le=1.0,
+        description="Target delta for LEAPS (deep ITM). Higher = safer but more expensive.",
+    )
+    leaps_target_dte: int = Field(
+        default=365,
+        ge=90,
+        description="Target DTE when buying new LEAPS.",
+    )
+    leaps_min_dte: int = Field(
+        default=180,
+        ge=30,
+        description="Minimum DTE for LEAPS. Below this, existing LEAPS will be rolled.",
+    )
+    leaps_roll_dte: int = Field(
+        default=90,
+        ge=14,
+        description="Roll LEAPS when DTE drops to this level.",
+    )
+    short_call_delta: float = Field(
+        default=0.30,
+        ge=0.05,
+        le=0.50,
+        description="Target delta for short calls (OTM).",
+    )
+    short_call_dte: int = Field(
+        default=30,
+        ge=1,
+        description="Target DTE for short calls.",
+    )
+    max_positions: int = Field(
+        default=1,
+        ge=1,
+        description="Maximum number of PMCC positions per symbol.",
+    )
+    roll_short_call_pnl: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        description="Roll short call when P&L reaches this percentage.",
+    )
+    roll_short_call_dte: int = Field(
+        default=5,
+        ge=0,
+        description="Roll short call when DTE drops to this level.",
+    )
+
+    def add_to_table(self, table: Table, section: str = "") -> None:
+        table.add_section()
+        table.add_row("[spring_green1]PMCC (Poor Man's Covered Call)")
+        table.add_row("", "Enabled", "=", f"{self.enabled}")
+        table.add_row("", "Symbols", "=", ", ".join(self.symbols) or "-")
+        table.add_row("", "LEAPS delta", ">=", f"{self.leaps_delta}")
+        table.add_row("", "LEAPS target DTE", ">=", f"{self.leaps_target_dte}")
+        table.add_row("", "LEAPS min DTE", ">=", f"{self.leaps_min_dte}")
+        table.add_row("", "LEAPS roll DTE", "<=", f"{self.leaps_roll_dte}")
+        table.add_row("", "Short call delta", "<=", f"{self.short_call_delta}")
+        table.add_row("", "Short call DTE", ">=", f"{self.short_call_dte}")
+        table.add_row("", "Max positions per symbol", "=", f"{self.max_positions}")
+        table.add_row(
+            "",
+            "Roll short call at P&L",
+            ">=",
+            f"{self.roll_short_call_pnl}",
+        )
+        table.add_row(
+            "",
+            "Roll short call at DTE",
+            "<=",
+            f"{self.roll_short_call_dte}",
+        )
 
 
 class SymbolConfig(BaseModel):
@@ -481,6 +591,7 @@ class SymbolConfig(BaseModel):
         write_threshold_sigma: Optional[float] = Field(default=None, gt=0)
         strike_limit: Optional[float] = Field(default=None, gt=0)
         maintain_high_water_mark: Optional[bool] = None
+        spread_width: Optional[float] = Field(default=None, gt=0)
         write_when: Optional["SymbolConfig.WriteWhen"] = Field(
             default_factory=lambda: SymbolConfig.WriteWhen()
         )
@@ -490,6 +601,7 @@ class SymbolConfig(BaseModel):
         write_threshold: Optional[float] = Field(default=None, ge=0, le=1)
         write_threshold_sigma: Optional[float] = Field(default=None, gt=0)
         strike_limit: Optional[float] = Field(default=None, gt=0)
+        spread_width: Optional[float] = Field(default=None, gt=0)
         write_when: Optional["SymbolConfig.WriteWhen"] = Field(
             default_factory=lambda: SymbolConfig.WriteWhen()
         )

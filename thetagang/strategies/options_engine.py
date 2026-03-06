@@ -380,6 +380,49 @@ class OptionsStrategyEngine:
             )
             self.order_ops.enqueue_order(sell_ticker.contract, order)
 
+            spread_width = self.config.get_spread_width(symbol, "C")
+            if spread_width is not None:
+                if not isinstance(sell_ticker.contract, Option):
+                    log.error(
+                        f"{symbol}: Unexpected non-option contract for call spread write. Skipping protective leg..."
+                    )
+                    continue
+                sell_contract = sell_ticker.contract
+                protective_strike = round(sell_contract.strike + spread_width, 2)
+                log.info(
+                    f"{symbol}: Buying protective C at strike {protective_strike} (spread_width={spread_width})"
+                )
+                protective_contract = Option(
+                    symbol,
+                    sell_contract.lastTradeDateOrContractMonth,
+                    protective_strike,
+                    "C",
+                    "SMART",
+                    currency="USD",
+                )
+                protective_ticker = await self.ibkr.get_ticker_for_contract(
+                    protective_contract,
+                    required_fields=[],
+                    optional_fields=[
+                        TickerField.MIDPOINT,
+                        TickerField.MARKET_PRICE,
+                    ],
+                )
+                if not protective_ticker.contract:
+                    log.error(
+                        f"{symbol}: Missing protective call contract after ticker lookup. Skipping protective leg..."
+                    )
+                    continue
+                protective_order = self.order_ops.create_limit_order(
+                    action="BUY",
+                    quantity=quantity,
+                    limit_price=round(get_lower_price(protective_ticker), 2),
+                )
+                self.order_ops.enqueue_order(
+                    protective_ticker.contract,
+                    protective_order,
+                )
+
     async def write_puts(
         self, puts: List[Tuple[str, str, int, Optional[float]]]
     ) -> None:
@@ -408,6 +451,49 @@ class OptionsStrategyEngine:
                 limit_price=round(get_higher_price(sell_ticker), 2),
             )
             self.order_ops.enqueue_order(sell_ticker.contract, order)
+
+            spread_width = self.config.get_spread_width(symbol, "P")
+            if spread_width is not None:
+                if not isinstance(sell_ticker.contract, Option):
+                    log.error(
+                        f"{symbol}: Unexpected non-option contract for put spread write. Skipping protective leg..."
+                    )
+                    continue
+                sell_contract = sell_ticker.contract
+                protective_strike = round(sell_contract.strike - spread_width, 2)
+                log.info(
+                    f"{symbol}: Buying protective P at strike {protective_strike} (spread_width={spread_width})"
+                )
+                protective_contract = Option(
+                    symbol,
+                    sell_contract.lastTradeDateOrContractMonth,
+                    protective_strike,
+                    "P",
+                    "SMART",
+                    currency="USD",
+                )
+                protective_ticker = await self.ibkr.get_ticker_for_contract(
+                    protective_contract,
+                    required_fields=[],
+                    optional_fields=[
+                        TickerField.MIDPOINT,
+                        TickerField.MARKET_PRICE,
+                    ],
+                )
+                if not protective_ticker.contract:
+                    log.error(
+                        f"{symbol}: Missing protective put contract after ticker lookup. Skipping protective leg..."
+                    )
+                    continue
+                protective_order = self.order_ops.create_limit_order(
+                    action="BUY",
+                    quantity=quantity,
+                    limit_price=round(get_lower_price(protective_ticker), 2),
+                )
+                self.order_ops.enqueue_order(
+                    protective_ticker.contract,
+                    protective_order,
+                )
 
     async def check_if_can_write_puts(
         self,
@@ -1223,6 +1309,78 @@ class OptionsStrategyEngine:
                     sell_ticker.contract
                 )
 
+                spread_width = self.config.get_spread_width(symbol, right)
+                protective_position: Optional[PortfolioItem] = None
+                protective_sell_ticker: Optional[Ticker] = None
+                if spread_width is not None and isinstance(position.contract, Option):
+                    symbol_positions = (
+                        portfolio_positions.get(symbol, [])
+                        if portfolio_positions
+                        else [
+                            p
+                            for p in self.ibkr.portfolio(position.account)
+                            if p.contract.symbol == symbol
+                        ]
+                    )
+                    protective_strike = round(
+                        position.contract.strike + spread_width
+                        if right.startswith("C")
+                        else position.contract.strike - spread_width,
+                        2,
+                    )
+
+                    for candidate in symbol_positions:
+                        if (
+                            candidate.position > 0
+                            and isinstance(candidate.contract, Option)
+                            and candidate.contract.right == right
+                            and candidate.contract.lastTradeDateOrContractMonth
+                            == position.contract.lastTradeDateOrContractMonth
+                            and math.isclose(
+                                candidate.contract.strike,
+                                protective_strike,
+                                rel_tol=0,
+                                abs_tol=0.01,
+                            )
+                        ):
+                            protective_position = candidate
+                            break
+
+                    protective_new_strike = round(
+                        sell_ticker.contract.strike + spread_width
+                        if right.startswith("C")
+                        else sell_ticker.contract.strike - spread_width,
+                        2,
+                    )
+                    log.info(
+                        f"{symbol}: Buying protective {right} at strike {protective_new_strike} (spread_width={spread_width})"
+                    )
+                    protective_contract = Option(
+                        symbol,
+                        sell_ticker.contract.lastTradeDateOrContractMonth,
+                        protective_new_strike,
+                        right,
+                        "SMART",
+                        currency="USD",
+                    )
+                    protective_sell_ticker = await self.ibkr.get_ticker_for_contract(
+                        protective_contract,
+                        required_fields=[],
+                        optional_fields=[
+                            TickerField.MIDPOINT,
+                            TickerField.MARKET_PRICE,
+                        ],
+                    )
+                    if protective_sell_ticker.contract:
+                        protective_sell_contract = protective_sell_ticker.contract
+                        self.qualified_contracts[protective_sell_contract.conId] = (
+                            protective_sell_contract
+                        )
+                    if protective_position:
+                        self.qualified_contracts[protective_position.contract.conId] = (
+                            protective_position.contract
+                        )
+
                 combo_legs = [
                     ComboLeg(
                         conId=position.contract.conId,
@@ -1257,6 +1415,38 @@ class OptionsStrategyEngine:
                     f"{symbol}: Rolling from_strike={position.contract.strike} to_strike={sell_ticker.contract.strike} from_dte={from_dte} to_dte={to_dte} price={dfmt(price, 3)} qty_to_roll={qty_to_roll}"
                 )
                 self.order_ops.enqueue_order(combo, order)
+
+                if protective_position and protective_sell_ticker:
+                    protective_qty_to_roll = min(
+                        qty_to_roll, math.floor(abs(protective_position.position))
+                    )
+                    protective_buy_ticker = await self.ibkr.get_ticker_for_contract(
+                        protective_position.contract,
+                        required_fields=[],
+                        optional_fields=[
+                            TickerField.MIDPOINT,
+                            TickerField.MARKET_PRICE,
+                        ],
+                    )
+                    close_protective_order = self.order_ops.create_limit_order(
+                        action="SELL",
+                        quantity=protective_qty_to_roll,
+                        limit_price=round(get_higher_price(protective_buy_ticker), 2),
+                        transmit=True,
+                    )
+                    self.order_ops.enqueue_order(
+                        protective_buy_ticker.contract, close_protective_order
+                    )
+
+                    open_protective_order = self.order_ops.create_limit_order(
+                        action="BUY",
+                        quantity=protective_qty_to_roll,
+                        limit_price=round(get_lower_price(protective_sell_ticker), 2),
+                        transmit=True,
+                    )
+                    self.order_ops.enqueue_order(
+                        protective_sell_ticker.contract, open_protective_order
+                    )
             except NoValidContractsError:
                 dte = option_dte(position.contract.lastTradeDateOrContractMonth)
                 if (

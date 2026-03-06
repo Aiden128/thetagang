@@ -22,6 +22,11 @@ from thetagang.strategies.post import (
     PostStrategyDeps,
     run_post_stages,
 )
+from thetagang.strategies.pmcc import (
+    PMCCStageService,
+    PMCCStrategyDeps,
+    run_pmcc_stages,
+)
 
 
 @pytest.mark.asyncio
@@ -218,3 +223,45 @@ async def test_run_post_stages_respects_enabled_stage_flags():
 
     service.do_vix_hedging.assert_not_called()
     service.do_cashman.assert_awaited_once_with({}, {})
+
+
+@pytest.mark.asyncio
+async def test_run_pmcc_stages_respects_enabled_stage_flags():
+    service = SimpleNamespace(manage_leaps=AsyncMock(), write_short_calls=AsyncMock())
+    deps = PMCCStrategyDeps(
+        enabled_stages={"pmcc_write_short_calls"},
+        service=cast(PMCCStageService, service),
+    )
+
+    await run_pmcc_stages(deps, {}, {})
+
+    service.manage_leaps.assert_not_called()
+    service.write_short_calls.assert_awaited_once_with({}, {})
+
+
+@pytest.mark.asyncio
+async def test_run_pmcc_stages_runs_both_stages():
+    service = SimpleNamespace(manage_leaps=AsyncMock(), write_short_calls=AsyncMock())
+    deps = PMCCStrategyDeps(
+        enabled_stages={"pmcc_manage_leaps", "pmcc_write_short_calls"},
+        service=cast(PMCCStageService, service),
+    )
+
+    await run_pmcc_stages(deps, {}, {})
+
+    service.manage_leaps.assert_awaited_once_with({}, {})
+    service.write_short_calls.assert_awaited_once_with({}, {})
+
+
+@pytest.mark.asyncio
+async def test_run_pmcc_stages_skips_all_when_no_stages_enabled():
+    service = SimpleNamespace(manage_leaps=AsyncMock(), write_short_calls=AsyncMock())
+    deps = PMCCStrategyDeps(
+        enabled_stages=set(),
+        service=cast(PMCCStageService, service),
+    )
+
+    await run_pmcc_stages(deps, {}, {})
+
+    service.manage_leaps.assert_not_called()
+    service.write_short_calls.assert_not_called()

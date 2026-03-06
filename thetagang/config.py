@@ -23,6 +23,7 @@ from thetagang.config_models import (
     IBCConfig,
     OptionChainsConfig,
     OrdersConfig,
+    PMCCConfig,
     RegimeRebalanceConfig,
     RollWhenConfig,
     SymbolConfig,
@@ -41,6 +42,8 @@ STAGE_KIND_BY_ID: dict[str, str] = {
     "equity_sell_rebalance": "equity.sell_rebalance",
     "options_roll_positions": "options.roll_positions",
     "options_close_positions": "options.close_positions",
+    "pmcc_manage_leaps": "pmcc.manage_leaps",
+    "pmcc_write_short_calls": "pmcc.write_short_calls",
     "post_vix_call_hedge": "post.vix_call_hedge",
     "post_cash_management": "post.cash_management",
 }
@@ -53,6 +56,8 @@ CANONICAL_STAGE_ORDER: list[str] = [
     "equity_sell_rebalance",
     "options_roll_positions",
     "options_close_positions",
+    "pmcc_manage_leaps",
+    "pmcc_write_short_calls",
     "post_vix_call_hedge",
     "post_cash_management",
 ]
@@ -69,6 +74,7 @@ RUN_STRATEGY_IDS = {
     "regime_rebalance",
     "vix_call_hedge",
     "cash_management",
+    "pmcc",
 }
 
 STRATEGY_STAGE_IDS: dict[str, set[str]] = {
@@ -83,6 +89,7 @@ STRATEGY_STAGE_IDS: dict[str, set[str]] = {
     "regime_rebalance": {"equity_regime_rebalance"},
     "vix_call_hedge": {"post_vix_call_hedge"},
     "cash_management": {"post_cash_management"},
+    "pmcc": {"pmcc_manage_leaps", "pmcc_write_short_calls"},
 }
 
 WHEEL_SYMBOL_OVERRIDE_KEYS = [
@@ -397,6 +404,10 @@ class RegimeRebalanceStrategyConfig(RegimeRebalanceConfig):
     )
 
 
+class PMCCStrategyConfig(PMCCConfig):
+    risk: StrategyRiskConfig = Field(default_factory=StrategyRiskConfig)
+
+
 class StrategiesConfig(BaseModel):
     wheel: WheelStrategyConfig
     regime_rebalance: RegimeRebalanceStrategyConfig = Field(
@@ -404,6 +415,7 @@ class StrategiesConfig(BaseModel):
     )
     vix_call_hedge: VIXCallHedgeConfig = Field(default_factory=VIXCallHedgeConfig)
     cash_management: CashManagementConfig = Field(default_factory=CashManagementConfig)
+    pmcc: PMCCStrategyConfig = Field(default_factory=PMCCStrategyConfig)
 
 
 class Config(BaseModel, DisplayMixin):
@@ -694,6 +706,7 @@ class Config(BaseModel, DisplayMixin):
         self.cash_management.add_to_table(config_table)
         self.vix_call_hedge.add_to_table(config_table)
         self.regime_rebalance.add_to_table(config_table)
+        self.strategies.pmcc.add_to_table(config_table)
 
         tree = Tree(":control_knobs:")
         tree.add(Group(f":file_cabinet: Loaded from {config_path}", config_table))
@@ -784,6 +797,24 @@ class Config(BaseModel, DisplayMixin):
             and symbol_config.close_if_unable_to_roll is not None
             else self.roll_when.close_if_unable_to_roll
         )
+
+    def get_spread_width(self, symbol: str, right: str) -> Optional[float]:
+        p_or_c = "calls" if right.upper().startswith("C") else "puts"
+        symbol_config = self.symbols.get(symbol)
+
+        if symbol_config:
+            option_config = getattr(symbol_config, p_or_c, None)
+            if (
+                option_config
+                and getattr(option_config, "spread_width", None) is not None
+            ):
+                return option_config.spread_width
+
+        target_option = getattr(self.target, p_or_c, None)
+        if target_option and getattr(target_option, "spread_width", None) is not None:
+            return target_option.spread_width
+
+        return self.target.spread_width
 
 
 DEFAULT_RUN_STRATEGIES: list[str] = ["wheel", "vix_call_hedge", "cash_management"]
